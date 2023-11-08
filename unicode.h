@@ -222,6 +222,10 @@ static const std::vector<std::pair<uint32_t, uint32_t>> control_ranges = {
 {0x2B81E, 0x2B81F}, {0x2CEA2, 0x2CEAF}, {0x2EBE1, 0x2F7FF}, {0x2FA1E, 0x2FFFF}, {0x3134B, 0xE00FF}, {0xE01F0, 0x10FFFF},
 };
 
+static const std::vector<std::pair<uint32_t, uint32_t>> cjk_ranges = {
+    {0x4E00, 0x9FA5}, {0x0800, 0x4E00}, {0xAC00, 0xD7FF},
+};
+
 static std::string codepoint_to_utf8(uint32_t cp) {
     std::string result;
     if (/* 0x00 <= cp && */ cp <= 0x7f) {
@@ -356,6 +360,7 @@ static std::vector<uint32_t> codepoints_from_utf16(const std::vector<uint16_t> &
 #define CODEPOINT_TYPE_PUNCTUATION 5
 #define CODEPOINT_TYPE_SYMBOL 6
 #define CODEPOINT_TYPE_CONTROL 7
+#define CODEPOINT_TYPE_CJK 8
 
 static std::unordered_map<uint32_t, int> codepoint_type_map() {
     std::unordered_map<uint32_t, int> codepoint_types;
@@ -386,6 +391,10 @@ static std::unordered_map<uint32_t, int> codepoint_type_map() {
     for(auto p : control_ranges) {
         for(auto i = p.first; i <= p.second; ++ i)
             codepoint_types[i] = CODEPOINT_TYPE_CONTROL;
+    }
+    for (auto p : cjk_ranges) {
+        for (auto i = p.first; i <= p.second; ++i)
+            codepoint_types[i] = CODEPOINT_TYPE_CJK;
     }
     return codepoint_types;
 }

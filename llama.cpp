@@ -2238,8 +2238,8 @@ static void llm_load_vocab(
             vocab.special_unk_id = 0;
             vocab.special_sep_id = -1;
             vocab.special_pad_id = -1;
-        } else if (tokenizer_name == "gpt2") {
-            vocab.type = LLAMA_VOCAB_TYPE_BPE;
+        } else if (tokenizer_name == "gpt2" || tokenizer_name == "deepseek_coder") {
+            vocab.type = tokenizer_name == "gpt2"? LLAMA_VOCAB_TYPE_BPE : LLAMA_VOCAB_TYPE_DEEPSEEK_CODER;
 
             // read bpe merges and populate bpe ranks
             const int merges_keyidx = gguf_find_key(ctx, kv(LLM_KV_TOKENIZER_MERGES).c_str());
@@ -2436,7 +2436,7 @@ static void llm_load_print_meta(llama_model_loader & ml, llama_model & model) {
     // hparams
     LLAMA_LOG_INFO("%s: format           = %s\n",     __func__, llama_file_version_name(ml.fver));
     LLAMA_LOG_INFO("%s: arch             = %s\n",     __func__, LLM_ARCH_NAMES.at(model.arch).c_str());
-    LLAMA_LOG_INFO("%s: vocab type       = %s\n",     __func__, vocab.type == LLAMA_VOCAB_TYPE_SPM ? "SPM" : "BPE"); // TODO: fix
+    LLAMA_LOG_INFO("%s: vocab type       = %s\n",     __func__, vocab.type == LLAMA_VOCAB_TYPE_SPM ? "SPM" : (vocab.type == LLAMA_VOCAB_TYPE_BPE? "BPE":"DEEPSEEK_CODER")); // TODO: fix
     LLAMA_LOG_INFO("%s: n_vocab          = %u\n",     __func__, hparams.n_vocab);
     LLAMA_LOG_INFO("%s: n_merges         = %u\n",     __func__, (int) vocab.bpe_ranks.size());
     LLAMA_LOG_INFO("%s: n_ctx_train      = %u\n",     __func__, hparams.n_ctx_train);
@@ -5523,7 +5523,13 @@ struct llm_tokenizer_bpe {
 
     void tokenize(const std::string & text, std::vector<llama_vocab::id> & output) {
         int final_prev_index = -1;
-        auto word_collection = bpe_gpt2_preprocess(text);
+        
+        std::vector<std::string> word_collection;
+        if (vocab.type == LLAMA_VOCAB_TYPE_BPE) {
+            word_collection = bpe_gpt2_preprocess(text);
+        } else if (vocab.type == LLAMA_VOCAB_TYPE_DEEPSEEK_CODER) {
+            word_collection = bpe_deepseek_coder_preprocess(text);
+        }
 
         symbols_final.clear();
 
@@ -5789,6 +5795,125 @@ private:
         return bpe_encoded_words;
     }
 
+    std::vector<std::string> bpe_deepseek_coder_preprocess(const std::string & text) {
+        std::vector<std::string> bpe_words;
+        std::vector<std::string> bpe_encoded_words;
+
+        std::string token = "";
+        
+        bool collecting_letter = false;
+        bool collecting_special = false;
+        bool collecting_punc = false;
+        bool collecting_cjk = false;
+        bool collecting = false;
+
+        std::vector<std::string> text_utf;
+        text_utf.reserve(text.size());
+        bpe_words.reserve(text.size());
+        bpe_encoded_words.reserve(text.size());
+
+        auto cps = codepoints_from_utf8(text);
+        for (size_t i = 0; i < cps.size(); ++i)
+            text_utf.emplace_back(codepoint_to_utf8(cps[i]));
+
+        for (int i = 0; i < (int)text_utf.size(); i++) {
+            const std::string & utf_char = text_utf[i];
+            bool split_condition = false;
+            int bytes_remain = text_utf.size() - i;
+            // std::cout<<utf_char<<std::endl;
+            // forward backward lookups
+            const std::string & utf_char_next = (i + 1 < (int)text_utf.size()) ? text_utf[i + 1] : "";
+            const std::string & utf_char_next_next = (i + 2 < (int)text_utf.size()) ? text_utf[i + 2] : "";
+
+            if(!split_condition && (utf_char == "\n" || utf_char == "\r"||codepoint_type(utf_char) == CODEPOINT_TYPE_DIGIT)){
+                if (token.size()) {
+                    bpe_words.emplace_back(token); // push previous content as token
+                }
+                token = utf_char;
+                bpe_words.emplace_back(token); // the contraction
+                token = "";
+                collecting = false;
+                collecting_letter = false;
+                collecting_special = false;
+                collecting_cjk = false;
+                collecting_punc = false;
+                continue;
+            }
+            if (!split_condition && !collecting) {
+                if (codepoint_type(utf_char) == CODEPOINT_TYPE_LETTER || ( codepoint_type(utf_char) == CODEPOINT_TYPE_WHITESPACE && codepoint_type(utf_char_next) == CODEPOINT_TYPE_LETTER)) {
+                    //"Regex": "\s?\p{L}+"
+                    collecting_letter = true;
+                    collecting = true;
+                }
+                else if (codepoint_type(utf_char) == CODEPOINT_TYPE_PUNCTUATION || ( codepoint_type(utf_char) == CODEPOINT_TYPE_WHITESPACE && codepoint_type(utf_char_next) == CODEPOINT_TYPE_PUNCTUATION)) {
+                    //"Regex": "\s?\p{P}+"
+                    collecting_punc = true;
+                    collecting = true;
+                }
+                else if (codepoint_type(utf_char) == CODEPOINT_TYPE_CJK) {
+                    collecting_cjk = true;
+                    collecting = true;
+                }
+                else{
+                    collecting_special = true;
+                    
+                }
+
+                if(collecting_special && collecting){
+                    if (token.size()) {
+                        bpe_words.emplace_back(token); // push previous content as token
+                    }
+                    token = "";
+                    collecting_special = false;
+                }
+            }
+            else if (!split_condition && collecting) {
+                if (collecting_letter && codepoint_type(utf_char) != CODEPOINT_TYPE_LETTER) {
+                    split_condition = true;
+                }
+                else if (collecting_cjk && codepoint_type(utf_char) != CODEPOINT_TYPE_CJK) {
+                    split_condition = true;
+                }
+                else if (collecting_punc && codepoint_type(utf_char) != CODEPOINT_TYPE_PUNCTUATION) {
+                    split_condition = true;
+                }
+
+            }
+
+            if (utf_char_next == "") {
+                split_condition = true; // final
+                token += utf_char;
+            }
+
+            if (split_condition) {
+                if (token.size()) {
+                    bpe_words.emplace_back(token);
+                }
+                token = "";
+                collecting = false;
+                collecting_letter = false;
+                // collecting_special = false;
+                collecting_cjk = false;
+                collecting_punc = false;
+                if(utf_char_next != "")
+                    i--;
+            }
+            else {
+                token += utf_char;
+            }
+        }
+
+        for (std::string & word : bpe_words) {
+            std::string encoded_token = "";
+            for (char & c : word) {
+                encoded_token += bytes_to_unicode_bpe(c);
+            }
+            bpe_encoded_words.emplace_back(encoded_token);
+        }
+
+        return bpe_encoded_words;
+    }
+
     const llama_vocab & vocab;
 
     std::vector<llm_symbol> symbols;
@@ -5976,6 +6101,7 @@ static std::vector<llama_vocab::id> llama_tokenize_internal(const llama_vocab & 
                     }
                 }
             } break;
+        case LLAMA_VOCAB_TYPE_DEEPSEEK_CODER:
         case LLAMA_VOCAB_TYPE_BPE:
             {
                 for (const auto & fragment: fragment_buffer)
@@ -9045,6 +9171,7 @@ int llama_token_to_piece(const struct llama_model * model, llama_token token, ch
             }
             break;
         }
+        case LLAMA_VOCAB_TYPE_DEEPSEEK_CODER:
         case LLAMA_VOCAB_TYPE_BPE: {
             if (llama_is_normal_token(model->vocab, token)) {
                 std::string result = model->vocab.id_to_token[token].text;
